@@ -1,10 +1,8 @@
 from flask import Flask, request
 import os
 import requests
-from dotenv import load_dotenv
 import socket
 
-load_dotenv()
 
 VT_API_KEY = os.getenv("VT_API_KEY")
 ABUSE_API_KEY = os.getenv("ABUSEIPDB_API_KEY")
