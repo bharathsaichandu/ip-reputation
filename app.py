@@ -1,94 +1,107 @@
-from flask import Flask, request, Response
-import requests
-import ipaddress
+from flask import Flask, request
 import os
+import requests
+from dotenv import load_dotenv
+import socket
 
-app = Flask(__name__)
+load_dotenv()
 
 VT_API_KEY = os.getenv("VT_API_KEY")
 ABUSE_API_KEY = os.getenv("ABUSEIPDB_API_KEY")
 VPNAPI_KEY = os.getenv("VPNAPI_KEY")
 
-MAX_IPS = 10
+app = Flask(__name__)
 
-
+# Function to process a single IP
 def process_ip(ip):
-    ipaddress.ip_address(ip)
-
     output = []
     output.append(f"---------------{ip} start-------------------\n")
 
-    # -------- VirusTotal --------
-    vt_url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
-    vt_headers = {"x-apikey": VT_API_KEY}
-    vt_resp = requests.get(vt_url, headers=vt_headers, timeout=10)
-    vt_data = vt_resp.json()
+    # ---------------- VirusTotal ----------------
+    vt_hits = 0
+    try:
+        vt_url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
+        headers = {"x-apikey": VT_API_KEY}
+        vt_response = requests.get(vt_url, headers=headers)
+        vt_data = vt_response.json()
+        stats = vt_data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+        vt_hits = sum(stats.values()) if stats else 0
+    except Exception:
+        vt_hits = 0
 
-    stats = vt_data["data"]["attributes"]["last_analysis_stats"]
-    hits = stats.get("malicious", 0) + stats.get("suspicious", 0)
-    total = sum(stats.values())
+    vt_msg = f"Found {vt_hits} out of 93 hits in VT" if vt_hits else "Found clean in VT"
 
-    # -------- AbuseIPDB --------
-    domain = "unknown domain"
-    if hits > 0:
-        abuse_url = "https://api.abuseipdb.com/api/v2/check"
-        abuse_headers = {"Key": ABUSE_API_KEY, "Accept": "application/json"}
-        abuse_params = {"ipAddress": ip, "maxAgeInDays": 90}
-        abuse_resp = requests.get(
-            abuse_url, headers=abuse_headers, params=abuse_params, timeout=10
-        )
-        domain = abuse_resp.json()["data"].get("domain", "unknown domain")
+    # ---------------- AbuseIPDB ----------------
+    domain = "No domain associated"
+    try:
+        abuse_url = f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90"
+        headers = {"Key": ABUSE_API_KEY, "Accept": "application/json"}
+        abuse_resp = requests.get(abuse_url, headers=headers).json()
+        abuse_data = abuse_resp.get("data", {})
+        # Use domain from API or reverse DNS fallback
+        domain = abuse_data.get("domain") or abuse_data.get("hostnames", [])
+        if isinstance(domain, list) and domain:
+            domain = domain[0]
+        elif isinstance(domain, list) and not domain:
+            # fallback to reverse DNS
+            try:
+                domain = socket.gethostbyaddr(ip)[0]
+            except Exception:
+                domain = "No domain associated"
+        elif not domain:
+            try:
+                domain = socket.gethostbyaddr(ip)[0]
+            except Exception:
+                domain = "No domain associated"
+        isp = abuse_data.get("isp", "Unknown ISP")
+    except Exception:
+        isp = "Unknown ISP"
 
-        output.append(f"Found {hits} out of {total} hits in VT and belongs to {domain}")
-    else:
-        output.append("Found clean in VT")
-
+    output.append(f"{vt_msg} and belongs to {domain}")
     output.append(f"https://www.virustotal.com/gui/ip-address/{ip}")
     output.append(f"https://www.abuseipdb.com/check/{ip}")
 
-    # -------- VPNAPI --------
-    vpn_url = f"https://vpnapi.io/api/{ip}?key={VPNAPI_KEY}"
-    vpn_resp = requests.get(vpn_url, timeout=10)
-    vpn_data = vpn_resp.json()
+    # ---------------- VPNAPI ----------------
+    vpn_output = []
+    try:
+        vpn_url = f"https://vpnapi.io/api/{ip}?key={VPNAPI_KEY}"
+        vpn_resp = requests.get(vpn_url).json()
+        vpn_data = vpn_resp.get("security", {})
+        loc_data = vpn_resp.get("location", {})
+        vpn_output.append("VPN Detection;\n")
+        vpn_output.append(f"--> ISP- {isp}")
+        vpn_output.append(f"--> VPN- {vpn_data.get('vpn', False)}")
+        vpn_output.append(f"--> Proxy- {vpn_data.get('proxy', False)}")
+        vpn_output.append(f"--> TOR Node- {vpn_data.get('tor', False)}")
+        vpn_output.append(f"--> City- {loc_data.get('city', 'Unknown')}")
+        vpn_output.append(f"--> Region- {loc_data.get('region', 'Unknown')}")
+        vpn_output.append(f"--> Country- {loc_data.get('country', 'Unknown')}")
+    except Exception:
+        vpn_output.append("No VPN detection")
 
-    if not vpn_data.get("security"):
-        output.append("No VPN detection")
-    else:
-        sec = vpn_data["security"]
-        loc = vpn_data.get("location", {})
-        net = vpn_data.get("network", {})
-
-        output.append("VPN Detection;\n")
-        output.append(f"--> ISP- {net.get('autonomous_system_organization', 'Unknown')}")
-        output.append(f"--> VPN- {sec.get('vpn')}")
-        output.append(f"--> Proxy- {sec.get('proxy')}")
-        output.append(f"--> TOR Node- {sec.get('tor')}")
-        output.append(f"--> City- {loc.get('city', 'Unknown')}")
-        output.append(f"--> Region- {loc.get('region', 'Unknown')}")
-        output.append(f"--> Country- {loc.get('country', 'Unknown')}")
-
-    output.append(f"\n---------------{ip} end-------------------\n")
-
+    output.extend(vpn_output)
+    output.append(f"---------------{ip} end-------------------\n")
     return "\n".join(output)
 
+# Route for health check
+@app.route("/")
+def home():
+    return "IP Reputation Service is running!"
 
+# Route to check IPs
 @app.route("/check")
 def check_ips():
     ips_param = request.args.get("ips")
     if not ips_param:
-        return Response("Use ?ips=ip1,ip2,ip3\n", mimetype="text/plain")
+        return "Please provide IPs as query parameter, e.g., ?ips=8.8.8.8,149.88.25.228"
 
-    ip_list = [ip.strip() for ip in ips_param.split(",") if ip.strip()]
-
-    if len(ip_list) > MAX_IPS:
-        return Response(f"Maximum {MAX_IPS} IPs allowed\n", mimetype="text/plain")
-
+    ip_list = [ip.strip() for ip in ips_param.split(",")]
     final_output = []
     for ip in ip_list:
         final_output.append(process_ip(ip))
 
-    return Response("\n".join(final_output), mimetype="text/plain")
-
+    return "<pre>" + "\n".join(final_output) + "</pre>"
 
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
