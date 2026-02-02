@@ -25,6 +25,8 @@ async def process_ip(ip):
     vt_hits = 0
     domain = "No domain associated"
     isp = "Unknown ISP"
+    sec = {}
+    loc = {}
     try:
         async with aiohttp.ClientSession() as session:
             # -------- VirusTotal --------
@@ -32,7 +34,7 @@ async def process_ip(ip):
             vt_headers = {"x-apikey": VT_API_KEY}
             vt_data = await fetch_json(session, vt_url, headers=vt_headers)
             stats = vt_data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-            vt_hits = sum(stats.values()) if stats else 0
+            vt_hits = (stats.get("malicious", 0) + stats.get("suspicious", 0)) if stats else 0
 
             # -------- AbuseIPDB --------
             abuse_url = "https://api.abuseipdb.com/api/v2/check"
@@ -55,12 +57,12 @@ async def process_ip(ip):
             loc = vpn_data.get("location", {})
             net = vpn_data.get("network", {})
     except Exception:
-        sec = {}
-        loc = {}
-        net = {}
+        pass
 
+    # VT message with green/red style
     vt_msg = f"Found {vt_hits} out of 93 hits in VT" if vt_hits else "Found clean in VT"
-    output.append(f"{vt_msg} and belongs to {domain}")
+    vt_color = "red" if vt_hits else "lime"
+    output.append(f"<span style='color:{vt_color}'>{vt_msg} and belongs to {domain}</span>")
     output.append(f"https://www.virustotal.com/gui/ip-address/{ip}")
     output.append(f"https://www.abuseipdb.com/check/{ip}")
 
@@ -97,7 +99,7 @@ def check_ips():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     results = loop.run_until_complete(asyncio.gather(*(process_ip(ip) for ip in ip_list)))
-    return Response("\n".join(results), mimetype="text/plain")
+    return Response("\n".join(results), mimetype="text/html")
 
 @app.route("/ui")
 def ui():
@@ -196,14 +198,13 @@ function checkIPs() {
 
 function copyOutput() {
     const outputDiv = document.getElementById("output");
-    navigator.clipboard.writeText(outputDiv.innerText); // copy silently
+    navigator.clipboard.writeText(outputDiv.innerText);
 }
 </script>
 
 </body>
 </html>
 """
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
